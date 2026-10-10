@@ -1,0 +1,15 @@
+
+# API keys and environment variables
+.env
+.env.*
+
+# Allow the example configuration
+!.env.example
+
+# Python cache files
+__pycache__/
+*.py[cod]
+
+# Virtual environments
+venv/
+.venv/
