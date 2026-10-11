@@ -7,6 +7,7 @@ import os
 import json
 import subprocess
 import uuid
+import datetime
 import imageio_ffmpeg
 from dotenv import load_dotenv
 
@@ -38,7 +39,41 @@ openrouter_client = OpenAI(
 
 FFMPEG_PATH = imageio_ffmpeg.get_ffmpeg_exe()
 
-print("🚀 ZERO-STORAGE SUBTITLE ENGINE READY!")
+# --- OPENROUTER DAILY USAGE TRACKER SETUP ---
+QUOTA_FILE = "openrouter_usage.json"
+MAX_DAILY_QUOTA = 50  # OpenRouter free tier limit guideline
+
+def check_openrouter_quota():
+    today_str = datetime.date.today().isoformat()
+    data = {"date": today_str, "used": 0}
+    if os.path.exists(QUOTA_FILE):
+        try:
+            with open(QUOTA_FILE, "r") as f:
+                saved = json.load(f)
+                if saved.get("date") == today_str:
+                    data = saved
+        except Exception:
+            pass
+    return MAX_DAILY_QUOTA - data["used"]
+
+def increment_openrouter_quota():
+    today_str = datetime.date.today().isoformat()
+    data = {"date": today_str, "used": 0}
+    if os.path.exists(QUOTA_FILE):
+        try:
+            with open(QUOTA_FILE, "r") as f:
+                saved = json.load(f)
+                if saved.get("date") == today_str:
+                    data = saved
+        except Exception:
+            pass
+    data["date"] = today_str
+    data["used"] += 1
+    with open(QUOTA_FILE, "w") as f:
+        json.dump(data, f)
+    return MAX_DAILY_QUOTA - data["used"]
+
+print("🚀 ZERO-STORAGE SUBTITLE ENGINE READY WITH QUOTA TRACKER!")
 
 @app.get("/")
 def read_index():
@@ -46,8 +81,25 @@ def read_index():
         return FileResponse("index.html")
     return {"error": "index.html not found in project folder."}
 
+@app.get("/quota-status/")
+def quota_status():
+    remaining = check_openrouter_quota()
+    return {
+        "daily_limit": MAX_DAILY_QUOTA,
+        "remaining_requests": remaining,
+        "reset_period": "Daily at midnight"
+    }
+
 @app.post("/translate-video/")
 async def translate_video(file: UploadFile = File(...)):
+    # 1. Check OpenRouter daily quota before starting
+    remaining = check_openrouter_quota()
+    if remaining <= 0:
+        return JSONResponse(
+            status_code=429, 
+            content={"error": "OpenRouter free daily limit (50 requests) reached for today. Please try again tomorrow!"}
+        )
+
     session_id = str(uuid.uuid4())[:8]
     temp_video_path = f"temp_{session_id}_{file.filename}"
     audio_path = f"temp_{session_id}.mp3"
@@ -57,13 +109,13 @@ async def translate_video(file: UploadFile = File(...)):
         with open(temp_video_path, "wb") as f:
             f.write(await file.read())
 
-        # 1. Extract audio via FFmpeg
+        # 2. Extract audio via FFmpeg
         subprocess.run([
             FFMPEG_PATH, "-y", "-i", temp_video_path,
             "-vn", "-acodec", "libmp3lame", "-ab", "128k", audio_path
         ], check=True)
 
-        # 2. Transcribe via Groq Whisper
+        # 3. Transcribe via Groq Whisper
         with open(audio_path, "rb") as audio_file:
             transcription = groq_client.audio.transcriptions.create(
                 file=(audio_path, audio_file.read()),
@@ -81,7 +133,7 @@ async def translate_video(file: UploadFile = File(...)):
                     "text": text
                 })
 
-        # 3. Translate lines into natural Burmese via DeepSeek on OpenRouter in chunks
+        # 4. Translate lines into natural Burmese via DeepSeek on OpenRouter in chunks
         if raw_segments:
             CHUNK_SIZE = 100
             for i in range(0, len(raw_segments), CHUNK_SIZE):
@@ -108,6 +160,9 @@ async def translate_video(file: UploadFile = File(...)):
                 for idx, seg in enumerate(chunk):
                     if idx < len(translated_list) and translated_list[idx]:
                         seg["text"] = translated_list[idx]
+
+            # Successfully completed translation; deduct from quota
+            increment_openrouter_quota()
 
         return {
             "subtitles": raw_segments,
